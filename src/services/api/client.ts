@@ -1,4 +1,5 @@
 import { ApiError, isErrorBody, readErrorResponse, request } from './transport.js'
+import { resizeUploadImage } from '../../utils/resizeUploadImage.js'
 import { readMessageEvent } from './parseEvent.js'
 import { readServerSentEvents } from './sse.js'
 import { streamOpenAI } from './openai.js'
@@ -51,7 +52,7 @@ export const uploadFile = async (
   if (purpose) {
     form.append('purpose', purpose)
   }
-  form.append('file', file)
+  form.append('file', purpose === null ? await resizeUploadImage(file, signal) : file)
   const response = await request(
     `${profile ? `${providerApiBase(profile)}/anthropic/v1` : ANTHROPIC_BASE_URL}/files`,
     {

@@ -6,8 +6,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: rgba(0, 0, 0, var(--overlay-opacity));
-  backdrop-filter: blur(2px);
+  &::before {
+    position: absolute;
+    inset: 0;
+    background-color: rgb(0 0 0 / var(--overlay-opacity));
+    pointer-events: none;
+    content: '';
+  }
 
   [data-ds-dark-theme] & {
     --overlay-opacity: 0.6;
@@ -15,6 +20,7 @@
 }
 
 .content {
+  position: relative;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;

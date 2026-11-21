@@ -19,6 +19,8 @@ export type FileAttachment = {
   id: string
   serverId: string | null
   connectionScope?: string
+  /** 当前 DeepSeek file_id 对应的图片已通过长边检查。旧记录缺少此字段。 */
+  imageSizeChecked?: boolean
   name: string
   size: number
   /** 附件类别；导入时沿用归档的 is_image，不由 MIME 识别结果决定。 */

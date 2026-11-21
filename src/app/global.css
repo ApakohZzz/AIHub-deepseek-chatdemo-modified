@@ -2,6 +2,8 @@
   --message-list-max-width: 840px;
   --message-list-padding-horizontal: 44px;
   --hub-fade-in: hub-fade-in;
+  --hub-dialog-enter-duration: 150ms;
+  --hub-dialog-enter-easing: cubic-bezier(0.22, 0.8, 0.28, 1);
 }
 
 @media (max-width: 1023px) {
@@ -98,6 +100,7 @@ body.change-theme *::after {
 }
 @keyframes hub-dialog-out {
   to {
+    opacity: 0;
     transform: translateY(4px) scale(0.98);
   }
 }
@@ -115,16 +118,19 @@ body.change-theme *::after {
   }
 }
 
-[data-modal-overlay] {
-  animation: hub-fade-in 210ms ease-out both;
+[data-modal-overlay]::before {
+  animation: hub-fade-in 115ms ease-out both;
 }
 
 [data-modal-overlay] > [role='dialog'] {
-  animation: hub-dialog-in 210ms cubic-bezier(0.22, 0.8, 0.28, 1) both;
+  animation: hub-dialog-in var(--hub-dialog-enter-duration) var(--hub-dialog-enter-easing) both;
 }
 
 [data-modal-overlay][data-closing='true'] {
   pointer-events: none;
+}
+
+[data-modal-overlay][data-closing='true']::before {
   animation: hub-fade-out 140ms ease-in both;
 }
 

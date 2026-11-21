@@ -17,11 +17,11 @@
   <a href="docs/screenshots/chat-dark.webp"><img src="docs/screenshots/chat-dark.webp" alt="AI Hub 深色聊天界面，展示置顶会话、Markdown 回复和输入框内的模型选择器"></a>
 </p>
 
-AI Hub 基于 [DeepSeek Chat Demo v0.1.2](https://github.com/deepseek-ai/chat-demo/tree/v0.1.2)，加入多供应商接入、会话全文搜索，以及可选的 Gitea 登录与跨设备同步。
+AI Hub 基于 [DeepSeek Chat Demo v0.1.3](https://github.com/deepseek-ai/chat-demo/tree/v0.1.3)，加入多供应商接入、会话全文搜索，以及可选的 Gitea 登录与跨设备同步。
 
 ## 相比上游新增了什么
 
-| | DeepSeek Chat Demo v0.1.2 | AI Hub |
+| | DeepSeek Chat Demo v0.1.3 | AI Hub |
 | --- | --- | --- |
 | **供应商和模型** | DeepSeek API | DeepSeek 与 OpenAI Chat Completions 兼容配置，支持获取可用模型、编辑模型目录，在聊天输入框直接切换模型 |
 | **会话管理** | 新建、重命名、删除和历史导入导出 | 搜索标题和当前分支的消息正文，高亮匹配片段，支持键盘打开结果。多选会话后可批量置顶、取消置顶或删除 |

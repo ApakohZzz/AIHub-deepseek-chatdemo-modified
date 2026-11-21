@@ -34,10 +34,27 @@ const completion = (text) => new Response(
   { headers: { 'Content-Type': 'text/event-stream' } }
 )
 
-test('provider editing and migration preserve a live chat, including after reload', { timeout: 60_000 }, async (t) => {
+const deepSeekCompletion = (body) => {
+  const content = body.messages.filter((message) => message.role === 'user').at(-1).content
+  const prompt = typeof content === 'string' ? content : content.find((block) => block.type === 'text').text
+  const stream = [
+    { type: 'message_start', message: { id: 'fixture-ds', model: body.model } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'DeepSeek reply: ' + prompt } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_stop' },
+  ].map((event) => 'data: ' + JSON.stringify(event) + '\n\n').join('')
+  return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } })
+}
+
+const imageIds = (body) => body.messages.flatMap(({ content }) =>
+  Array.isArray(content) ? content.filter(({ type }) => type === 'image').map(({ source }) => source.file_id) : []
+)
+
+test('provider editing, image uploads and history survive account sync and reload', { timeout: 90_000 }, async (t) => {
   const browserPath = await findBrowser()
   const webDir = resolve('dist')
   await access(join(webDir, 'index.html'))
+  const { version } = JSON.parse(await readFile(join(webDir, 'version.json'), 'utf8'))
   const directory = await mkdtemp(join(tmpdir(), 'aihub-provider-browser-'))
   const browserProfile = join(directory, 'browser')
   const actualFetch = globalThis.fetch
@@ -53,6 +70,8 @@ test('provider editing and migration preserve a live chat, including after reloa
   let searchRequest
   let speechRequest
   let uploadAttempts = 0
+  const imageUploads = []
+  const imageReplies = []
   let lastChatContent
   let transcribed = false
   let invalidOpenAIKey = false
@@ -149,9 +168,34 @@ test('provider editing and migration preserve a live chat, including after reloa
         return Response.json({ data: [{ id: 'deepseek-flash', context_window: 1048576, max_output_tokens: 393216 }] })
       case deepseek + '/anthropic/v1/files': {
         assert.equal(init.headers.get('x-api-key'), deepseekKey)
-        for await (const _chunk of init.body) { /* Consume the multipart upload. */ }
+        const chunks = []
+        for await (const chunk of init.body) chunks.push(chunk)
+        const form = await new Response(Buffer.concat(chunks), {
+          headers: { 'Content-Type': init.headers.get('content-type') },
+        }).formData()
+        const file = form.get('file')
+        if (file.type === 'image/png') {
+          const bytes = Buffer.from(await file.arrayBuffer())
+          const width = bytes.readUInt32BE(16)
+          const height = bytes.readUInt32BE(20)
+          assert.ok(Math.max(width, height) <= 4096, 'DeepSeek received an oversized image')
+          assert.equal(form.has('purpose'), false)
+          const id = 'file_fixture_' + (imageUploads.length + 1)
+          imageUploads.push({ id, name: file.name, width, height, sha256: createHash('sha256').update(bytes).digest('hex') })
+          return Response.json({ id })
+        }
         uploadAttempts++
         return Response.json({ error: { message: 'Unsupported file format' } }, { status: 400 })
+      }
+      case deepseek + '/anthropic/v1/messages': {
+        const chunks = []
+        for await (const chunk of init.body) chunks.push(chunk)
+        const request = JSON.parse(Buffer.concat(chunks).toString())
+        const ids = imageIds(request)
+        assert.ok(!ids.includes('file_legacy_wide') && !ids.includes('file_legacy_tall'))
+        assert.equal(init.headers.get('anthropic-beta'), 'files-api-2025-04-14')
+        imageReplies.push(ids)
+        return deepSeekCompletion(request)
       }
       case deepseek + '/v1/tools/asr': {
         assert.equal(init.headers.get('authorization'), 'Bearer ' + deepseekKey)
@@ -269,9 +313,31 @@ test('provider editing and migration preserve a live chat, including after reloa
   }
   const send = async (text, prefix) => {
     await enterText('textarea', text)
+    await until("document.querySelector('button[aria-label=\"发送\"]')?.getAttribute('aria-disabled') !== 'true'")
     await click('button[aria-label="发送"]')
     await until(`document.body.textContent.includes(${JSON.stringify(prefix + text)}) && !document.querySelector('button[aria-label="停止生成"]')`)
   }
+  const attachImages = (images) => evaluate(`(async () => {
+    const transfer = new DataTransfer()
+    const digests = {}
+    for (const [name, width, height] of ${JSON.stringify(images)}) {
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const context = canvas.getContext('2d')
+      context.fillStyle = '#597bf1'
+      context.fillRect(0, 0, width, height)
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+      canvas.width = canvas.height = 0
+      const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())
+      digests[name] = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+      transfer.items.add(new File([blob], name, { type: 'image/png' }))
+    }
+    const input = document.querySelector('input[type="file"]')
+    input.files = transfer.files
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    return digests
+  })()`, true)
   const readReply = (text, label) => evaluate(`(() => {
     const answer = [...document.querySelectorAll('.ds-assistant-message-main-content')].find(node => node.textContent.includes(${JSON.stringify(text)}))
     answer.closest('[data-message-id]').querySelector(${JSON.stringify(`button[aria-label="${label}"]`)}).click()
@@ -660,19 +726,20 @@ test('provider editing and migration preserve a live chat, including after reloa
   // Observe the actual Anthropic-format request built from the composer switch.
   await evaluate(`(() => {
     const actual = fetch
+    const reply = ${deepSeekCompletion.toString()}
     window.fixtureDeepSeekRequests = []
-    window.fetch = (url, init) => {
+    window.fixtureDirectImageSize = null
+    window.fetch = async (url, init) => {
+      if (url === 'https://api.deepseek.com/anthropic/v1/files') {
+        const image = await createImageBitmap(init.body.get('file'))
+        window.fixtureDirectImageSize = [image.width, image.height]
+        image.close()
+        return Response.json({ id: 'file_direct_image' })
+      }
       if (url !== 'https://api.deepseek.com/anthropic/v1/messages') return actual(url, init)
       const body = JSON.parse(init.body)
       window.fixtureDeepSeekRequests.push(body)
-      const text = 'DeepSeek reply: ' + body.messages.filter(message => message.role === 'user').at(-1).content
-      const stream = [
-        { type: 'message_start', message: { id: 'fixture-ds', model: body.model } },
-        { type: 'content_block_start', index: 0, content_block: { type: 'text', text } },
-        { type: 'content_block_stop', index: 0 },
-        { type: 'message_stop' },
-      ].map(event => 'data: ' + JSON.stringify(event) + '\\n\\n').join('')
-      return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } }))
+      return reply(body)
     }
   })()`)
   await until(`document.querySelector(${JSON.stringify(thinking)}).getAttribute('aria-pressed') === 'false'`)
@@ -683,6 +750,10 @@ test('provider editing and migration preserve a live chat, including after reloa
   assert.deepEqual(requests.map(request => request.thinking.type), ['disabled', 'enabled'])
   assert.ok(requests.every(request => !Object.hasOwn(request, 'output_config') &&
     !Object.hasOwn(request, 'reasoning_effort')))
+  await attachImages([['direct-wide.png', 6000, 1500]])
+  await send('browser direct image', 'DeepSeek reply: ')
+  assert.deepEqual(await evaluate('window.fixtureDirectImageSize'), [4096, 1024])
+  assert.deepEqual(imageIds(await evaluate('window.fixtureDeepSeekRequests.at(-1)')), ['file_direct_image'])
 
   await viewport(1100, 760, false)
   await evaluate('window.fixtureDeepSeekAvailable = true')
@@ -811,10 +882,71 @@ test('provider editing and migration preserve a live chat, including after reloa
   await clickText('button', '使用 Gitea 登录')
   await until(`document.querySelector('textarea') && document.querySelectorAll('[data-session-id]').length > 0`)
   await clickText('button', '开启新对话')
+  await click(chooser)
+  await clickText('[role="option"]', 'deepseek-flash')
+  const images = [['wide.png', 6000, 1500], ['edge.png', 4096, 512], ['tall.png', 1000, 5000]]
+  const originalDigests = await attachImages(images)
+  await send('sync original images', 'DeepSeek reply: ')
+  assert.deepEqual(imageUploads.map(({ name, width, height }) => [name, width, height]).sort(), [
+    ['edge.png', 4096, 512], ['tall.png', 819, 4096], ['wide.png', 4096, 1024],
+  ])
+  const uploadedIds = images.map(([name]) => imageUploads.find((image) => image.name === name).id)
+  assert.deepEqual(imageReplies.at(-1), uploadedIds)
+  assert.equal(imageUploads.find(({ name }) => name === 'edge.png').sha256, originalDigests['edge.png'])
+  const imageChatId = await evaluate(`document.querySelector('[data-session-id] [aria-current="true"]').closest('[data-session-id]').dataset.sessionId`)
+  const legacyChatId = 'legacy-synced-images'
+  const legacyIds = ['file_legacy_wide', 'file_legacy_edge', 'file_legacy_tall']
+  const sessionPath = (id) => '/api/account/sync/sessions/' + Buffer.from(id).toString('base64url')
+  const waitForImageRecord = async (id, ready) => {
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const record = await evaluate(`(async () => {
+        const { workspace } = await fetch('/api/account/session').then(response => response.json())
+        const response = await fetch(${JSON.stringify(sessionPath(id))}, { headers: { 'X-AIHub-Workspace': workspace } })
+        return response.ok ? response.json() : null
+      })()`, true)
+      if (record && ready(record)) return record
+      await sleep(100)
+    }
+    assert.fail('The image conversation did not sync to the account')
+  }
+  const imageRecord = await waitForImageRecord(imageChatId, (session) =>
+    session.messages.some((message) => message.role === 'assistant' && message.status === 'done')
+  )
+  assert.deepEqual(imageRecord.messages[0].files.map(({ serverId, imageSizeChecked }) => [serverId, imageSizeChecked]),
+    uploadedIds.map((id) => [id, true]))
+  const legacyRecord = {
+    ...imageRecord, id: legacyChatId, title: 'Legacy synced images',
+    messages: [
+      {
+        ...imageRecord.messages[0],
+        files: imageRecord.messages[0].files.map(({ imageSizeChecked, ...file }, index) =>
+          ({ ...file, serverId: legacyIds[index] })
+        ),
+      },
+      ...imageRecord.messages.slice(1),
+    ],
+  }
+  assert.equal(await evaluate(`(async () => {
+    const { workspace } = await fetch('/api/account/session').then(response => response.json())
+    const response = await fetch(${JSON.stringify(sessionPath(legacyChatId))}, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json', 'X-AIHub-Workspace': workspace,
+        'X-AIHub-Revision': '0', 'X-AIHub-Mutation': crypto.randomUUID(),
+      },
+      body: JSON.stringify(${JSON.stringify(legacyRecord)}),
+    })
+    return response.status
+  })()`, true), 200)
+  await clickText('button', '开启新对话')
   const unsentDraft = '跨设备草稿 🧪'
   await enterText('textarea', unsentDraft)
   await openProviders()
   await clickText('[role="tab"]', '通用设置')
+  assert.equal(
+    await evaluate('document.querySelector(\'[role="tabpanel"]\').lastElementChild?.textContent'),
+    '版本号v' + version
+  )
   await clickText('[role="radio"]', '深色')
   await clickText('[role="tab"]', '数据管理')
   const remotePreferencesAndDraft = await evaluate(`(async () => {
@@ -887,6 +1019,50 @@ test('provider editing and migration preserve a live chat, including after reloa
   assert.equal(await evaluate(`localStorage.getItem('ai-hub:providers')`), null)
   await clickText('button', '使用 Gitea 登录')
   await until(`document.querySelector('textarea')?.value === ${JSON.stringify(unsentDraft)} && document.body.classList.contains('dark')`)
+  const openImageChat = async (id) => {
+    const selector = `[data-session-id="${id}"] > button`
+    await until(`document.querySelector(${JSON.stringify(selector)})`)
+    await click(selector)
+    for (const [name, width, height] of images) {
+      await until(`(() => {
+        const image = document.querySelector(${JSON.stringify(`img[alt="${name}"]`)})
+        return image?.naturalWidth === ${width} && image.naturalHeight === ${height}
+      })()`)
+    }
+  }
+  await openImageChat(imageChatId)
+  assert.deepEqual(await evaluate(`(async () => {
+    const digests = {}
+    for (const name of ${JSON.stringify(images.map(([name]) => name))}) {
+      const image = document.querySelector('img[alt="' + name + '"]')
+      const original = await fetch(image.src).then(response => response.arrayBuffer())
+      const sha = await crypto.subtle.digest('SHA-256', original)
+      digests[name] = Array.from(new Uint8Array(sha), byte => byte.toString(16).padStart(2, '0')).join('')
+    }
+    return digests
+  })()`, true), originalDigests)
+  await send('continue with checked images', 'DeepSeek reply: ')
+  assert.deepEqual(imageReplies.at(-1), uploadedIds)
+  assert.equal(imageUploads.length, 3)
+  await openImageChat(legacyChatId)
+  await send('continue with legacy images', 'DeepSeek reply: ')
+  const reuploads = imageUploads.slice(3)
+  assert.deepEqual(reuploads.map(({ name, width, height }) => [name, width, height]).sort(), [
+    ['tall.png', 819, 4096], ['wide.png', 4096, 1024],
+  ])
+  const updatedIds = [reuploads.find(({ name }) => name === 'wide.png').id, legacyIds[1],
+    reuploads.find(({ name }) => name === 'tall.png').id]
+  assert.deepEqual(imageReplies.at(-1), updatedIds)
+  await waitForImageRecord(legacyChatId, (session) =>
+    session.messages[0].files.every((file) => file.imageSizeChecked)
+  )
+  await evaluate('window.beforeImageReload = true')
+  await cdp('Page.reload', { ignoreCache: true })
+  await until('!window.beforeImageReload && Boolean(document.querySelector("textarea"))')
+  await openImageChat(legacyChatId)
+  await send('reuse migrated image IDs after reload', 'DeepSeek reply: ')
+  assert.deepEqual(imageReplies.at(-1), updatedIds)
+  assert.equal(imageUploads.length, 5)
   const mirroredChat = `[data-session-id="${mirroredId}"] > button`
   await until(`document.querySelector(${JSON.stringify(mirroredChat)})`)
   await click(mirroredChat)
@@ -1002,12 +1178,23 @@ test('provider editing and migration preserve a live chat, including after reloa
   // a successful edit from a second device using the current server revision.
   await evaluate(`(async () => {
     window.workspaceFetch = window.fetch
+    window.workspaceFixtureRequest = async (url, init) => {
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const response = await window.workspaceFetch(url, init)
+        if (response.status !== 429) return response
+        await response.text()
+        await new Promise(resolve => setTimeout(resolve, 75))
+      }
+      throw new Error('Workspace still busy when simulating a second device')
+    }
     const { workspace } = await window.workspaceFetch('/api/account/session').then((response) => response.json())
     const id = btoa(${JSON.stringify(mirroredId)}).replace(/=+$/, '')
     const endpoint = '/api/account/sync/sessions/' + id
     const headers = { 'X-AIHub-Workspace': workspace }
-    const response = await window.workspaceFetch(endpoint, { headers })
-    window.workspaceConflict = { endpoint, headers, revision: response.headers.get('X-AIHub-Revision'), value: await response.json() }
+    const response = await window.workspaceFixtureRequest(endpoint, { headers })
+    const revision = response.headers.get('X-AIHub-Revision')
+    if (!response.ok || !revision) throw new Error('Could not read the workspace revision: ' + response.status)
+    window.workspaceConflict = { endpoint, headers, revision, value: await response.json() }
     window.fetch = (url, init) => String(url).startsWith('/api/account/sync/')
       ? Promise.reject(new TypeError('Fixture lost connectivity'))
       : window.workspaceFetch(url, init)
@@ -1021,7 +1208,7 @@ test('provider editing and migration preserve a live chat, including after reloa
   await until(`document.querySelector(${JSON.stringify(mirroredChat)})?.textContent.includes('离线设备改名')`)
   assert.equal(await evaluate(`(async () => {
     const { endpoint, headers, revision, value } = window.workspaceConflict
-    const response = await window.workspaceFetch(endpoint, {
+    const response = await window.workspaceFixtureRequest(endpoint, {
       method: 'PUT',
       headers: { ...headers, 'X-AIHub-Revision': revision, 'X-AIHub-Mutation': crypto.randomUUID(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...value, title: '另一设备改名', pinned: true }),
@@ -1064,4 +1251,29 @@ test('provider editing and migration preserve a live chat, including after reloa
   await clickText('[role="option"]', '使用默认模型')
   await send('render widgets', 'Account reply: ')
   await until(`document.querySelector('.katex .katex-html') && document.querySelector('.md-mermaid-diagram svg')?.textContent.includes('Start')`)
+
+  const searchButton = 'button[aria-label="搜索对话"]'
+  await click(searchButton)
+  await until('document.activeElement === document.querySelector("dialog input")')
+  assert.deepEqual(await evaluate(`(() => {
+    const dialog = document.querySelector('dialog')
+    const backdrop = getComputedStyle(dialog, '::backdrop')
+    return [getComputedStyle(dialog).animationDuration, backdrop.backdropFilter, backdrop.animationName]
+  })()`), ['0.15s', 'blur(4px)', 'none'])
+  await enterText('dialog input', 'render widgets')
+  await until('document.querySelector("dialog [role=option][aria-selected=true]")')
+  await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
+  await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
+  await until('!document.querySelector("dialog") && document.body.textContent.includes("Account reply: render widgets")')
+
+  await openProviders(3)
+  assert.deepEqual(await evaluate(`(() => {
+    const overlay = document.querySelector('[data-modal-overlay]')
+    const style = getComputedStyle(overlay)
+    const dialog = getComputedStyle(overlay.querySelector('[role=dialog]'))
+    return [style.animationName, style.backdropFilter, dialog.animationDuration]
+  })()`), ['none', 'none', '0.15s'])
+  await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: 8, y: 8, button: 'left', clickCount: 1 })
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 8, y: 8, button: 'left', clickCount: 1 })
+  await until('!document.querySelector("[role=dialog]")')
 })

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { createId } from '../../utils/id.js'
+import { isUploadImageOversized } from '../../utils/resizeUploadImage.js'
 import { getChatCapabilities } from '../chatCapabilities.js'
 import { ApiError, streamMessage } from '../api/client.js'
 import type { ChatModel, CreateMessageRequest } from '../api/types.js'
@@ -703,6 +704,8 @@ export const sendMessage = (targetSessionId: string | null) => {
     return false
   }
   const history = getVisibleMessages(current)
+  const selection = getSessionSelection(sessionId)
+  const usesDeepSeekFiles = getProvider(selection.providerId)?.protocol === 'deepseek'
   const question: UserMessage = {
     id: createId(),
     role: 'user',
@@ -715,10 +718,11 @@ export const sendMessage = (targetSessionId: string | null) => {
       isImage,
       mimeType,
       connectionScope,
+      imageSizeChecked: isImage && usesDeepSeekFiles ? true : undefined,
     })),
     createdAt: now,
   }
-  const reply = createReply(getSessionSelection(sessionId))
+  const reply = createReply(selection)
   updateSession(sessionId, (session) => ({
     ...appendBranch(session, history.at(-1)?.id ?? null, [question, reply]),
     updatedAt: now,
@@ -878,10 +882,10 @@ export const retryUpload = (sessionId: string, messageId: string) => {
 
 type Request = { history: Message[]; question: UserMessage; prefix?: AssistantMessage }
 
-/** 把补传得到的 serverId 写回会话里所有引用同一附件的消息（编辑、重新生成会共用附件） */
+/** 把补传或校验后的 ID 写回所有引用。传 null 会清除超限旧图的 ID。 */
 const saveServerIds = (
   sessionId: string,
-  serverIds: Map<string, string>,
+  serverIds: ReadonlyMap<string, string | null>,
   connection: ProviderProfile
 ) => {
   if (serverIds.size === 0) {
@@ -893,20 +897,60 @@ const saveServerIds = (
       message.role === 'user' && message.files.some((file) => serverIds.has(file.id))
         ? {
             ...message,
-            files: message.files.map((file) =>
-              serverIds.has(file.id)
-                ? {
-                    ...file,
-                    serverId: serverIds.get(file.id) ?? null,
-                    connectionScope: connection.scope,
-                  }
-                : file
-            ),
+            files: message.files.map((file) => {
+              const serverId = serverIds.get(file.id)
+              if (serverId === undefined) return file
+              return {
+                ...file,
+                serverId,
+                connectionScope: connection.scope,
+                imageSizeChecked: serverId && file.isImage && connection.protocol === 'deepseek'
+                  ? true
+                  : undefined,
+              }
+            }),
           }
         : message
     ),
   }))
   persist(sessionId)
+}
+
+const getScopedServerId = (
+  connection: ProviderProfile,
+  file: FileAttachment
+): string | null => {
+  const sameScope =
+    file.connectionScope === connection.scope ||
+    (!file.connectionScope &&
+      connection.id === LEGACY_PROVIDER_ID &&
+      connection.scope === LEGACY_SCOPE)
+  return sameScope ? file.serverId : null
+}
+
+/** 旧图有原件时检查当前连接的 file_id，原件暂不可用时保留该 ID。 */
+const checkImageFileIds = async (
+  connection: ProviderProfile,
+  files: FileAttachment[],
+  signal: AbortSignal
+) => {
+  const checked = new Map<string, string | null>()
+  for (const file of files) {
+    const serverId = getScopedServerId(connection, file)
+    if (!file.isImage || !serverId || file.imageSizeChecked || checked.has(file.id)) continue
+    signal.throwIfAborted()
+    const oversized = await db.loadFile(file.id)
+      .then((blob) => blob && isUploadImageOversized(blob))
+      .catch(() => undefined)
+    signal.throwIfAborted()
+    if (oversized === undefined) continue
+    const task = useUploads.getState().tasks[file.id]
+    if (oversized && task?.status === 'done' && task.scope === connection.scope && task.serverId === serverId) {
+      cancelUpload(file.id)
+    }
+    checked.set(file.id, oversized ? null : serverId)
+  }
+  return checked
 }
 
 /**
@@ -917,14 +961,8 @@ const ensureServerId = async (
   connection: ProviderProfile,
   file: FileAttachment
 ): Promise<string | null> => {
-  const sameScope =
-    file.connectionScope === connection.scope ||
-    (!file.connectionScope &&
-      connection.id === LEGACY_PROVIDER_ID &&
-      connection.scope === LEGACY_SCOPE)
-  if (file.serverId && sameScope) {
-    return file.serverId
-  }
+  const existing = getScopedServerId(connection, file)
+  if (existing) return existing
   const task = useUploads.getState().tasks[file.id]
   if (task?.status === 'done' && task.scope === connection.scope) {
     return task.serverId
@@ -975,10 +1013,21 @@ const prepareFiles = async (
   const aborted = new Promise<never>((_, reject) => {
     signal.addEventListener('abort', () => reject(signal.reason), { once: true })
   })
+  if (connection.protocol === 'deepseek') {
+    const files = [
+      ...request.question.files,
+      ...getContextRounds(request.history).flatMap(([user]) => user.files),
+    ]
+    const checked = await Promise.race([checkImageFileIds(connection, files, signal), aborted])
+    if (checked.size > 0 && epoch === historyEpoch) {
+      saveServerIds(sessionId, checked, connection)
+      request = refreshRequest(sessionId, request)
+    }
+  }
   const uploads = Promise.allSettled(
     request.question.files.map(async (file) => {
       const serverId = await ensureServerId(connection, file)
-      if (serverId) {
+      if (serverId && serverId !== getScopedServerId(connection, file)) {
         serverIds.set(file.id, serverId)
       }
     })
@@ -998,7 +1047,7 @@ const prepareFiles = async (
   for (const [user] of getContextRounds(request.history).toReversed()) {
     for (const file of user.files) {
       if (
-        (!file.serverId || file.connectionScope !== connection.scope) &&
+        !getScopedServerId(connection, file) &&
         !serverIds.has(file.id) &&
         !pending.has(file.id)
       ) {
@@ -1026,15 +1075,11 @@ const prepareFiles = async (
     if (latest.role !== 'user') return latest
     return {
       ...latest,
-      files: latest.files.map((file) => {
-        const legacy =
-          !file.connectionScope &&
-          connection.id === LEGACY_PROVIDER_ID &&
-          connection.scope === LEGACY_SCOPE
-        return file.connectionScope === connection.scope || legacy
+      files: latest.files.map((file) =>
+        getScopedServerId(connection, file) === file.serverId
           ? file
           : { ...file, serverId: null }
-      }),
+      ),
     }
   }
   return {
@@ -1092,7 +1137,7 @@ const reuploadInvalidatedFiles = (sessionId: string, request: Request, error: un
       }
       localIds.push(file.id)
       changed = true
-      return { ...file, serverId: null }
+      return { ...file, serverId: null, imageSizeChecked: undefined }
     })
     return changed ? { ...message, files } : message
   })

@@ -68,6 +68,7 @@ const sections: { value: SettingsSection; label: TranslationKey; icon: ReactNode
 
 const SettingsContent = () => {
   const t = useTranslate()
+  const siteVersion = document.querySelector<HTMLMetaElement>('meta[name="application-version"]')?.content
   const user = useAccount((state) => state.user)
   const workspace = useAccount((state) => state.workspace)
   const hydrated = useWorkspaceSync((state) => state.hydrated)
@@ -120,6 +121,13 @@ const SettingsContent = () => {
               <LocaleSetting />
               <TtsVoiceSetting />
               <LocationSetting />
+              {siteVersion && (
+                <SettingCell
+                  label={t('settingsSiteVersion')}
+                  status={null}
+                  action={<span className={styles.description}>v{siteVersion}</span>}
+                />
+              )}
             </>
           ) : (
             <>

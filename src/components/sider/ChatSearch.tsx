@@ -198,7 +198,7 @@ const SearchDialog = () => {
         }
         useChatSearch.setState({ open: false })
       },
-      reduced ? 0 : 170
+      reduced ? 0 : 120
     )
     return () => window.clearTimeout(timer)
   }, [closing])

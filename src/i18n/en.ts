@@ -218,6 +218,7 @@ export const en = {
   settingsTtsVoiceStella: 'Stella (female)',
   settingsTtsVoiceTide: 'Tide (male)',
   settingsLocation: 'Location',
+  settingsSiteVersion: 'Version',
   settingsLocationProvince: 'Select province/region',
   settingsLocationCity: 'Select city',
   settingsLocationRegion: 'Select country or region',
