@@ -1,0 +1,115 @@
+.profileLabel,
+.actions,
+.editorFooter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.profileLabel > svg {
+  flex-shrink: 0;
+}
+
+.profileLabel > bdi {
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  flex-shrink: 0;
+}
+
+.addSelect {
+  width: 160px;
+}
+
+.profileGroup {
+  border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
+}
+
+.editor {
+  margin-bottom: 12px;
+  padding: 4px 14px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.editor .field {
+  min-height: 54px;
+  padding-block: 9px;
+}
+
+.field > :first-child,
+.addProvider > :first-child,
+.profile > :first-child {
+  padding-right: 0;
+}
+
+.field .control {
+  width: min(64%, 320px);
+  min-width: 0;
+  text-align: start;
+}
+
+.description,
+.notice {
+  margin: 0 0 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.notice {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.editorFooter {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 12px 0 0;
+}
+
+.editorFooter .actions {
+  margin-inline-start: auto;
+}
+
+@media (max-width: 767px) {
+  .addProvider,
+  .field {
+    flex-wrap: wrap;
+  }
+
+  .addProvider > :first-child,
+  .field > :first-child,
+  .field .control {
+    flex-basis: 100%;
+  }
+
+  .addProvider .actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .profile .actions > button {
+    min-width: 0;
+    padding: 0 10px;
+  }
+}
+.profileSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.connection {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background-color: var(--dsw-alias-label-caption);
+}
+
+.connection[data-connection='connected'] {
+  background-color: var(--dsw-static-green-500);
+}

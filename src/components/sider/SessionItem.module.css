@@ -1,0 +1,185 @@
+.item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 40px;
+  padding-right: 5px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
+
+  &.active {
+    background-color: var(--dsw-specific-sidebar-nav-item-active-accent);
+    color: var(--dsw-alias-brand-primary-invert);
+  }
+
+  @media (hover: hover) {
+    &:not(.active, [data-selected='true']):hover {
+      background-color: var(--dsw-specific-sidebar-nav-item-hover);
+    }
+
+    &:hover,
+    &:focus-within,
+    &.active {
+      .action {
+        display: flex;
+      }
+    }
+  }
+}
+
+.rowButton {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 0 0 10px;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rowButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+
+.rowButton:disabled {
+  cursor: default;
+}
+
+.indicator {
+  display: flex;
+  flex: none;
+  width: 0;
+  overflow: hidden;
+  margin-right: 0;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition:
+    width 180ms ease,
+    margin-right 180ms ease,
+    opacity 150ms ease,
+    transform 180ms ease;
+}
+
+.item[data-selecting='true'] .indicator {
+  width: 19px;
+  margin-right: 8px;
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.check {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 50%;
+  color: white;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+
+.check svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0;
+  transform: scale(0.72);
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+
+.item[data-selected='true'] .check {
+  border-color: var(--dsw-alias-button-primary-fill);
+  background-color: var(--dsw-alias-button-primary-fill);
+}
+
+.item[data-selected='true'] .check svg {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.pin {
+  display: flex;
+  flex: none;
+  margin-inline: 5px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.pin svg {
+  width: 13px;
+  height: 13px;
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 18px;
+}
+
+.action {
+  display: none;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.renameInput {
+  box-sizing: border-box;
+  width: 100%;
+  height: 40px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid var(--dsw-alias-brand-primary);
+  background-color: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+
+@media (hover: none) {
+  .action {
+    display: flex;
+  }
+}
+
+@media not all and (min-width: 768px) {
+  .item {
+    height: 44px;
+    border-radius: 12px;
+    font-size: 16px;
+  }
+
+  .rowButton {
+    padding-left: 12px;
+  }
+
+  .title {
+    line-height: 22px;
+  }
+
+  .renameInput {
+    height: 44px;
+    padding: 0 12px;
+    border-radius: 16px;
+    font-size: 16px;
+  }
+}
