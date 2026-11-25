@@ -1,3 +1,4 @@
+import { throwIfAborted } from '../../utils/abort.js'
 import { create } from 'zustand'
 import type { TranslationMessage } from '../../i18n/index.js'
 import { ApiError } from '../api/client.js'
@@ -175,7 +176,7 @@ export const toggleReadAloud = (
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
       await context.resume()
-      controller.signal.throwIfAborted()
+      throwIfAborted(controller.signal)
       const stream = await synthesize(
         connection.apiKey,
         text,
@@ -192,7 +193,7 @@ export const toggleReadAloud = (
       )
       for (;;) {
         const { done, value } = await reader.read()
-        controller.signal.throwIfAborted()
+        throwIfAborted(controller.signal)
         if (done) {
           break
         }

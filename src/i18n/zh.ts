@@ -233,6 +233,9 @@ export const zh = {
   historyImportConfirmTitle: '确认导入历史对话？',
   historyImportConfirmDescription: '上传的历史对话会覆盖当前所有对话记录，是否确认导入？',
   historyImportDescription: '导入会替换当前保存位置的会话与附件，支持 DeepSeek ZIP。',
+  historyImportReading: '正在读取归档…',
+  historyImportProgress: '已处理 {processed} / {total} 个会话',
+  historyImportSaving: '正在保存历史…',
   historyImportedOne: '已导入 1 个对话',
   historyImported: '已导入 {count} 个对话',
   historyImportFailed:

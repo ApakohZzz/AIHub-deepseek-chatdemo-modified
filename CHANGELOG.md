@@ -1,5 +1,27 @@
 # AI Hub Changelog
 
+## v0.6.5
+
+### 简体中文
+
+- 合入 DeepSeek Chat Demo v0.1.4。历史 ZIP 读取复用目录与窗口缓存，会话和附件分批写入暂存，附件随所属会话导入。
+- 数据管理显示导入会话进度。关闭再打开设置仍可查看，事务提交后显示结果。
+- 保留 AI Hub 导入的文档和图片原件、MIME、置顶和模型信息。导入失败时保留已有历史。
+- 改善旧浏览器的导入、请求取消和移动端视口高度兼容性。
+
+[上游发布](https://github.com/deepseek-ai/chat-demo/releases/tag/v0.1.4)
+
+提供 Web 和 Server ZIP 及对应 SHA-256 校验文件。
+
+### English
+
+- Integrates DeepSeek Chat Demo v0.1.4. ZIP imports reuse directory and read-window caches and stage chats with their attachments in batches.
+- Data management shows import progress across settings dialog reopenings and reports success after the local transaction commits.
+- Retains original documents and images, MIME types, pins, and provider and model information. A failed import preserves the existing history.
+- Improves import, request cancellation, and mobile viewport compatibility on older browsers.
+
+Web and Server ZIPs include SHA-256 checksums.
+
 ## v0.6.4
 
 ### 简体中文

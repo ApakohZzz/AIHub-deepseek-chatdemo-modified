@@ -1,3 +1,4 @@
+import { getAbortReason } from '../utils/abort.js'
 import { create } from 'zustand'
 import type { LinkedMessage, TranslationMessage } from '../i18n/index.js'
 import { ApiError, uploadFile } from './api/client.js'
@@ -129,7 +130,7 @@ const enqueueUpload = (
   new Promise<string>((resolve, reject) => {
     queue.push(async () => {
       if (signal.aborted) {
-        reject(signal.reason)
+        reject(getAbortReason(signal))
         return
       }
       try {

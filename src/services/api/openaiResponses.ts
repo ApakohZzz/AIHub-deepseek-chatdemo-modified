@@ -1,3 +1,4 @@
+import { throwIfAborted } from '../../utils/abort.js'
 import { readServerSentEvents } from './sse.js'
 import { ApiError } from './transport.js'
 import type { MessageStreamEvent, MessageUsage, TextCitation } from './types.js'
@@ -63,7 +64,7 @@ export async function* streamOpenAIResponses(
   yield { type: 'message_start', message: { id: crypto.randomUUID(), model } }
   const blocks = new Map<string, number>()
   for await (const { data } of readServerSentEvents(response.body, signal)) {
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     if (data === '[DONE]') {
       break
     }
@@ -124,6 +125,6 @@ export async function* streamOpenAIResponses(
         : { type: 'text_delta', text: text ?? '' },
     }
   }
-  signal.throwIfAborted()
+  throwIfAborted(signal)
   throw new ApiError('interrupted', '')
 }

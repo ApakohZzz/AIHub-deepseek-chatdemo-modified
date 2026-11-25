@@ -1,4 +1,5 @@
 import * as db from '../db.js'
+import type { Session } from '../types.js'
 import { BackupError, fail } from './errors.js'
 import type { SessionIndexEntry } from './format.js'
 import { INDEX_PATH, MANIFEST_PATH, USER_PATH, parseSessionPath, sessionFilesDir } from './paths.js'
@@ -13,7 +14,11 @@ import {
   type ArchiveEntry,
 } from './zipReader.js'
 
-/** 从原件字节补充图片 MIME；无法识别时为空字符串，图片身份仍由归档的 is_image 决定。 */
+export type ImportProgressCallback = (processed: number, total: number) => void
+
+const fileOwner = (path: string) => /^chat_sessions\/([^/]+)_files\//.exec(path)?.[1]
+
+/** 从图片原件字节补充 MIME；无法识别时为空字符串，图片身份仍由归档的 is_image 决定。 */
 const imageType = (bytes: Uint8Array): string => {
   const startsWith = (...prefix: number[]) => prefix.every((byte, index) => bytes[index] === byte)
   const header = new TextDecoder('ascii').decode(bytes.subarray(0, 12))
@@ -42,7 +47,12 @@ const imageType = (bytes: Uint8Array): string => {
 }
 
 const readJson = async (entry: ArchiveEntry): Promise<unknown> => {
-  const text = await (await readEntry(entry)).text()
+  const decoder = new TextDecoder('utf-8')
+  let text = ''
+  for await (const chunk of entry.stream) {
+    text += decoder.decode(chunk, { stream: true })
+  }
+  text += decoder.decode()
   try {
     return JSON.parse(text)
   } catch {
@@ -73,36 +83,93 @@ export const checkArchiveFormat = async (file: File): Promise<void> => {
 }
 
 /**
- * 流式导入：manifest → user（可选）→ 会话 JSON → index → 附件。
- * 也支持会话与图片交错排列、index 位于末尾的条目顺序。
- * 会话读完立即暂存，只保留图片路径映射；图片全部读完后逐会话回填 MIME，不改变图片身份。
+ * 按会话读取 JSON 和对应文件，保留归档物理顺序的格式校验。
+ * 支持附件集中放在索引后，也支持会话与附件交错排列、索引位于末尾。
  * 写入导入暂存存储；调用方负责先清空暂存，成功后替换正式数据，失败时清理暂存。
  */
-export const importArchive = async (file: File): Promise<void> => {
+export const importArchive = async (
+  file: File,
+  storage: string | null,
+  onProgress?: ImportProgressCallback
+): Promise<void> => {
   if (!(await isZipFile(file))) {
     fail('backupUnrecognized')
   }
   const imported = new Set<string>()
-  const attachments = new Map<string, { id: string; type?: string }>()
-  /** 已保存的原件：文件 ID → MIME。同一图片出现在多个会话目录时只保存一次。 */
+  const firstFileOffset = new Map<string, number>()
+  const fileSessions = new Map<string, Set<string>>()
+  // 同一原件可能出现在多个会话目录，保留物理顺序最早的条目。
   const stored = new Map<string, string>()
   let manifest = false
   let index: SessionIndexEntry[] | undefined
   let currentSessionId: string | undefined
+  let totalSessions = 0
 
-  const saveAttachment = async (entry: ArchiveEntry, { id, type: declaredType }: { id: string; type?: string }) => {
-    if (stored.has(id)) {
+  const maxSessionBatchCount = 32
+  const maxSessionBatchBytes = 2 * 1024 * 1024
+  let sessionBatch: Session[] = []
+  let sessionBatchBytes = 0
+  const flushSessions = async () => {
+    if (!sessionBatch.length) {
+      return
+    }
+    await flushFiles()
+    await db.addStagingSessions(sessionBatch, storage)
+    sessionBatch = []
+    sessionBatchBytes = 0
+    if (imported.size < totalSessions) {
+      onProgress?.(imported.size, totalSessions)
+    }
+  }
+
+  const maxFileBatchCount = 16
+  const maxFileBatchBytes = 4 * 1024 * 1024
+  let fileBatch: db.StoredFile[] = []
+  let fileBatchBytes = 0
+  const flushFiles = async () => {
+    if (!fileBatch.length) {
+      return
+    }
+    await db.saveStagingFiles(fileBatch, storage)
+    fileBatch = []
+    fileBatchBytes = 0
+  }
+  const saveAttachment = async (
+    entry: ArchiveEntry,
+    { id, type }: { id: string; type?: string }
+  ) => {
+    if (entry.offset >= (firstFileOffset.get(id) ?? Infinity)) {
       await skipEntry(entry)
       return
     }
-    const data = await readEntry(entry)
-    const type = declaredType ?? imageType(new Uint8Array(await data.slice(0, 16).arrayBuffer()))
-    await db.saveStagingFiles([{ id, blob: new Blob([data], { type }) }])
-    stored.set(id, type)
+    if (fileBatchBytes + entry.size > maxFileBatchBytes) {
+      await flushFiles()
+    }
+    const blob = await readEntry(entry, type === undefined ? imageType : () => type)
+    fileBatch.push({ id, blob })
+    fileBatchBytes += blob.size
+    firstFileOffset.set(id, entry.offset)
+    stored.set(id, blob.type)
+    if (fileBatch.length >= maxFileBatchCount || fileBatchBytes >= maxFileBatchBytes) {
+      await flushFiles()
+    }
   }
 
   try {
+    const entries: ArchiveEntry[] = []
+    const filesBySession = new Map<string, ArchiveEntry[]>()
     for await (const entry of readArchive(file)) {
+      entries.push(entry)
+      const id = parseSessionPath(entry.path)
+      if (id !== null) {
+        filesBySession.set(id, [])
+      } else {
+        filesBySession.get(fileOwner(entry.path) ?? '')?.push(entry)
+      }
+    }
+    totalSessions = filesBySession.size
+    if (totalSessions > 0) onProgress?.(0, totalSessions)
+    for (const entry of entries) {
       const { path } = entry
       const sessionId = parseSessionPath(path)
       if (!manifest) {
@@ -115,27 +182,49 @@ export const importArchive = async (file: File): Promise<void> => {
         // 账号信息（已脱敏）不导入；文件可能缺失。
         await skipEntry(entry)
       } else if (sessionId !== null && !index) {
+        if (sessionBatchBytes + entry.size > maxSessionBatchBytes) {
+          await flushSessions()
+        }
         const local = toLocalSession(readSessionFile(await readJson(entry)))
         if (local.session.id !== sessionId || imported.has(sessionId)) {
           fail('backupIncomplete')
         }
         imported.add(sessionId)
         currentSessionId = sessionId
-        for (const [attachmentPath, attachment] of local.attachments) {
-          attachments.set(attachmentPath, attachment)
+        for (const fileEntry of filesBySession.get(sessionId) ?? []) {
+          const attachment = local.attachments.get(fileEntry.path)
+          await (attachment === undefined ? skipEntry(fileEntry) : saveAttachment(fileEntry, attachment))
         }
-        await db.addStagingSession(local.session)
+        for (const message of local.session.messages) {
+          if (message.role !== 'user') {
+            continue
+          }
+          for (const attachment of message.files) {
+            let sessions = fileSessions.get(attachment.id)
+            if (!sessions) {
+              sessions = new Set()
+              fileSessions.set(attachment.id, sessions)
+            }
+            sessions.add(sessionId)
+          }
+        }
+        sessionBatch.push(local.session)
+        sessionBatchBytes += entry.size
+        if (
+          sessionBatch.length >= maxSessionBatchCount ||
+          sessionBatchBytes >= maxSessionBatchBytes
+        ) {
+          await flushSessions()
+        }
       } else if (path === INDEX_PATH && !index) {
         index = readSessionIndex(await readJson(entry))
+        await flushSessions()
       } else if (
         index
-          ? imported.has(/^chat_sessions\/([^/]+)_files\//.exec(path)?.[1] ?? '')
-          : currentSessionId && path.startsWith(sessionFilesDir(currentSessionId))
+          ? !imported.has(fileOwner(path) ?? '')
+          : !currentSessionId || !path.startsWith(sessionFilesDir(currentSessionId))
       ) {
-        // 没有被引用的条目不保存，引用了但缺失的图片只展示文件名。
-        const attachment = attachments.get(path)
-        await (attachment === undefined ? skipEntry(entry) : saveAttachment(entry, attachment))
-      } else {
+        // 附件正文已随所属会话处理，此处仍校验归档中的位置。
         fail('backupIncomplete')
       }
     }
@@ -155,5 +244,18 @@ export const importArchive = async (file: File): Promise<void> => {
   ) {
     fail('backupIncomplete')
   }
-  await db.updateStagingFileTypes(stored)
+  await flushSessions()
+  const targetSessions = new Set<string>()
+  for (const [id, type] of stored) {
+    if (!type) {
+      continue
+    }
+    for (const sessionId of fileSessions.get(id) ?? []) {
+      targetSessions.add(sessionId)
+    }
+  }
+  if (targetSessions.size > 0) {
+    await db.updateStagingFileTypes(stored, targetSessions, storage)
+  }
+  onProgress?.(imported.size, totalSessions)
 }

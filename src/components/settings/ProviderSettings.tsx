@@ -1,3 +1,4 @@
+import { abortTimeout } from '../../utils/abort.js'
 import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import { removeAccountProvider, saveAccountProvider, useAccount } from '../../services/account.js'
@@ -183,7 +184,7 @@ const ProviderRow = ({ profile, onRemove }: { profile: ProviderProfile; onRemove
       return
     }
     const controller = new AbortController()
-    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])
+    const signal = abortTimeout(8000, controller.signal)
     const settle = (models: ModelEntry[] | null) => {
       if (!controller.signal.aborted) {
         setProbe({ profile, models })

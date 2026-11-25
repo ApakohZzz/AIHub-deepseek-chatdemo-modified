@@ -1,3 +1,4 @@
+import { throwIfAborted } from '../../utils/abort.js'
 import { ApiError, request } from './transport.js'
 import { streamOpenAIResponses } from './openaiResponses.js'
 import { readServerSentEvents } from './sse.js'
@@ -135,7 +136,7 @@ export async function* streamOpenAI(
         ...(effort && { reasoning_effort: effort }),
         ...(maxTokens && { max_completion_tokens: maxTokens }),
       }
-  signal.throwIfAborted()
+  throwIfAborted(signal)
   const path = useSearch ? '/responses' : '/chat/completions'
   const response = await request(providerApiBase(profile) + path, {
     method: 'POST',
@@ -183,7 +184,7 @@ export async function* streamOpenAI(
     }
   }
   for await (const chunk of chunks()) {
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     if (chunk.error) throw new ApiError('stream', chunk.error.message ?? '供应商返回错误。')
     if (chunk.usage) usage = normalizeUsage(chunk.usage)
     const choice = chunk.choices?.[0]
@@ -228,7 +229,7 @@ export async function* streamOpenAI(
     }
     if (choice.message) finished = true
   }
-  signal.throwIfAborted()
+  throwIfAborted(signal)
   if (!finished) throw new ApiError('interrupted', '')
   if (current) yield { type: 'content_block_stop', index }
   yield { type: 'message_delta', delta: { stop_reason: finishReason, stop_sequence: null }, usage }

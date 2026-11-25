@@ -1,3 +1,4 @@
+import { abortTimeout, throwIfAborted } from '../utils/abort.js'
 import { create } from 'zustand'
 import * as db from './chat/db.js'
 import type {
@@ -156,12 +157,12 @@ export const bindWorkspaceSync = (workspace: string, hooks: SyncHooks) => {
   let timer: ReturnType<typeof setTimeout> | undefined
 
   const request = (path: string, init?: RequestInit) => {
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     return fetch('/api/account/sync' + path, {
       ...init,
       headers: { 'X-AIHub-Workspace': workspace, ...init?.headers },
       cache: 'no-store',
-      signal: AbortSignal.any([signal, AbortSignal.timeout(90000)]),
+      signal: abortTimeout(90000, signal),
     })
   }
 
@@ -224,7 +225,7 @@ export const bindWorkspaceSync = (workspace: string, hooks: SyncHooks) => {
       throw new Error(`Workspace write returned ${response.status}`)
     const { revision, deleted } = await response.json()
     const recordedRevision = revisionNumber(revision)
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     if (response.ok) {
       await db.acknowledgeWorkspaceMutation(workspace, pending, recordedRevision)
       return false
@@ -287,7 +288,7 @@ export const bindWorkspaceSync = (workspace: string, hooks: SyncHooks) => {
         continue
       }
       if (record && record.revision >= change.revision) change.revision = record.revision
-      signal.throwIfAborted()
+      throwIfAborted(signal)
       const result = await db.applyWorkspaceChange(workspace, change, record?.value ?? null)
       if (result === 'applied') changes.add(change.kind)
       if (result === 'pending') blocked = true
@@ -333,7 +334,7 @@ export const bindWorkspaceSync = (workspace: string, hooks: SyncHooks) => {
             `ai-hub:sync:${workspace}`,
             { ifAvailable: true },
             async (lock) => {
-              signal.throwIfAborted()
+              throwIfAborted(signal)
               if (lock) return synchronize()
               // Another tab may have pulled changes into this shared cache.
               for (const kind of kinds) changes.add(kind)

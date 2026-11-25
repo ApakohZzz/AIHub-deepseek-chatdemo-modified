@@ -1,7 +1,12 @@
 .dialog {
   --search-viewport-top: 0px;
-  --search-viewport-height: 100dvh;
-  --search-top: clamp(24px, 14dvh, 192px);
+  --search-viewport-height: 100vh;
+  --search-top: clamp(24px, 14vh, 192px);
+
+  @supports (height: 100dvh) {
+    --search-viewport-height: 100dvh;
+    --search-top: clamp(24px, 14dvh, 192px);
+  }
   --search-header-height: 60px;
   --search-results-bottom: var(--search-top);
   --search-results-limit: 872px;

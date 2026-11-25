@@ -17,11 +17,11 @@
   <a href="docs/screenshots/chat-dark.webp"><img src="docs/screenshots/chat-dark.webp" alt="AI Hub dark theme showing a pinned conversation, a Markdown reply, and the model picker in the composer"></a>
 </p>
 
-AI Hub builds on [DeepSeek Chat Demo v0.1.3](https://github.com/deepseek-ai/chat-demo/tree/v0.1.3). It adds multi-provider chat, searchable history, and an optional account server that keeps your workspace available across devices.
+AI Hub builds on [DeepSeek Chat Demo v0.1.4](https://github.com/deepseek-ai/chat-demo/tree/v0.1.4). It adds multi-provider chat, searchable history, and an optional account server that keeps your workspace available across devices.
 
 ## What AI Hub adds
 
-| | DeepSeek Chat Demo v0.1.3 | AI Hub |
+| | DeepSeek Chat Demo v0.1.4 | AI Hub |
 | --- | --- | --- |
 | **Providers and models** | DeepSeek API | DeepSeek and OpenAI Chat Completions-compatible profiles, editable model catalogs, model discovery, and a picker in the composer |
 | **Conversation library** | Create, rename, delete, and import or export chats | Search chat titles and active-branch messages with highlighted snippets and keyboard navigation. Select multiple chats to pin, unpin, or delete |

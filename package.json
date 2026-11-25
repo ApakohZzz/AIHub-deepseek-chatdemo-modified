@@ -1,6 +1,6 @@
 {
   "name": "ai-hub-chatbox",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "AI Hub 多供应商聊天客户端。",
   "license": "MIT",
   "private": true,

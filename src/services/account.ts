@@ -1,3 +1,4 @@
+import { abortTimeout } from '../utils/abort.js'
 import { create } from 'zustand'
 import { translate } from '../i18n/index.js'
 import { flushWorkspaceChanges } from './workspace.js'
@@ -60,7 +61,7 @@ export const loadAccount = async () => {
   try {
     const response = await fetch(base + '/session', {
       cache: 'no-store',
-      signal: AbortSignal.timeout(8000),
+      signal: abortTimeout(8000),
     })
     const type = response.headers.get('content-type') ?? ''
     if (response.status === 404 || (response.ok && type.startsWith('text/html'))) {
@@ -105,7 +106,7 @@ const mutate = async (path: string, method: string, body?: object) => {
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
     cache: 'no-store',
-    signal: AbortSignal.timeout(12000),
+    signal: abortTimeout(12000),
   })
   if (response.ok) return response
   const data = await response.json().catch(() => null)

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { strToU8, zipSync } from 'fflate'
+import { ArchiveError, isZipFile, readArchive, readEntry, skipEntry, type ArchiveEntry } from '../src/services/chat/history/zipReader.js'
 import type { Session } from '../src/services/chat/types.js'
 
 Object.assign(globalThis, { __API_ORIGIN__: 'https://api.deepseek.com' })
@@ -95,4 +97,50 @@ test('keeps document originals in a v3 archive and accepts older metadata-only a
   files[0].export_path = null
   delete files[0].ai_hub_mime_type
   assert.equal(toLocalSession(readSessionFile(file)).attachments.size, 0)
+})
+
+test('reads a v3 ZIP manifest and supports reading the remaining entries out of order', async () => {
+  const content = new Uint8Array(512 * 1024 + 17).fill(65)
+  for (const level of [0, 6] as const) {
+    const bytes = zipSync({
+      'manifest.json': strToU8('{"export_format_version":3}'),
+      'chat_sessions/fixture.json': strToU8('{"id":"fixture"}'),
+      'chat_sessions/fixture_files/text_note.txt': content,
+    }, { level })
+    const file = new File([new Uint8Array(bytes)], 'history.zip')
+    assert.ok(await isZipFile(file))
+    for await (const manifest of readArchive(file)) {
+      assert.equal(manifest.path, 'manifest.json')
+      assert.equal(await (await readEntry(manifest)).text(), '{"export_format_version":3}')
+      break
+    }
+    const entries: ArchiveEntry[] = []
+    for await (const entry of readArchive(file)) entries.push(entry)
+    assert.deepEqual(entries.map(({ path }) => path), [
+      'manifest.json', 'chat_sessions/fixture.json', 'chat_sessions/fixture_files/text_note.txt',
+    ])
+    assert.ok(entries[2].offset > entries[1].offset)
+    const result = await readEntry(entries[2], (prefix) => {
+      assert.deepEqual(prefix, content.subarray(0, 16))
+      return 'text/plain'
+    })
+    assert.equal(result.type, 'text/plain')
+    assert.deepEqual(new Uint8Array(await result.arrayBuffer()), content)
+    assert.equal(await (await readEntry(entries[1])).text(), '{"id":"fixture"}')
+  }
+})
+
+test('discarding an unreferenced attachment still validates its CRC', async () => {
+  const original = 'Contents of an unused history attachment'
+  const zip = Buffer.from(zipSync({
+    'manifest.json': strToU8('{"export_format_version":3}'),
+    'chat_sessions/fixture_files/unused.txt': strToU8(original),
+  }, { level: 0 }))
+  const start = zip.indexOf(original)
+  assert.ok(start > 0)
+  zip[start] ^= 1
+  const file = new File([new Uint8Array(zip)], 'broken-history.zip')
+  await assert.rejects(async () => {
+    for await (const entry of readArchive(file)) await skipEntry(entry)
+  }, ArchiveError)
 })

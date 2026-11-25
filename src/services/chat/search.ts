@@ -1,3 +1,4 @@
+import { throwIfAborted } from '../../utils/abort.js'
 import { getVisibleMessages } from './branches.js'
 import type { Message, Session } from './types.js'
 
@@ -49,9 +50,9 @@ export const searchChatMessages = async (
   const hits: MessageSearchHit[] = []
   let failed = false
   for (const id of ids) {
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     const session = await read(id).catch(() => undefined)
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     if (!session) {
       failed = true
       continue

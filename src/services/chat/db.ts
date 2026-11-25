@@ -285,9 +285,20 @@ export const deleteSessions = async (ids: ReadonlySet<string>): Promise<void> =>
   ])
 }
 
-const putFiles = async (store: 'files' | 'filesStaging', files: StoredFile[]) => {
-  const tx = (await getDB()).transaction(store, 'readwrite')
-  await Promise.all([...files.map((file) => tx.store.put(file)), tx.done])
+const putFiles = async (store: 'files' | 'filesStaging', files: StoredFile[], workspace = activeWorkspace) => {
+  if (!files.length) return
+  const tx = (await getDB(workspace)).transaction(store, 'readwrite')
+  await Promise.all([
+    (async () => {
+      try {
+        await Promise.all(files.map((file) => tx.store.put(file)))
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
 }
 
 export const saveFiles = (files: StoredFile[]): Promise<void> => putFiles('files', files)
@@ -296,8 +307,8 @@ export const loadFile = async (id: string, storage = activeWorkspace): Promise<B
   (await (await getDB(storage)).get('files', id))?.blob
 
 /** 清空导入暂存：开始导入前清除上次中断（如关闭页面）遗留的数据，导入失败后清除本次写入。 */
-export const clearStaging = async (): Promise<void> => {
-  const tx = (await getDB()).transaction(['sessionsStaging', 'filesStaging'], 'readwrite')
+export const clearStaging = async (workspace: string | null): Promise<void> => {
+  const tx = (await getDB(workspace)).transaction(['sessionsStaging', 'filesStaging'], 'readwrite')
   await Promise.all([
     tx.objectStore('sessionsStaging').clear(),
     tx.objectStore('filesStaging').clear(),
@@ -305,36 +316,55 @@ export const clearStaging = async (): Promise<void> => {
   ])
 }
 
-export const addStagingSession = async (session: Session): Promise<void> => {
-  await (await getDB()).add('sessionsStaging', session)
-}
-
-export const saveStagingFiles = (files: StoredFile[]): Promise<void> =>
-  putFiles('filesStaging', files)
-
-/** 图片位于会话 JSON 之后；全部读完后回填具体 MIME，保留归档给出的 isImage 标识。 */
-export const updateStagingFileTypes = async (types: ReadonlyMap<string, string>): Promise<void> => {
-  const tx = (await getDB()).transaction('sessionsStaging', 'readwrite')
+export const addStagingSessions = async (sessions: Session[], workspace: string | null): Promise<void> => {
+  if (!sessions.length) return
+  const tx = (await getDB(workspace)).transaction('sessionsStaging', 'readwrite')
   await Promise.all([
     (async () => {
-      for (let cursor = await tx.store.openCursor(); cursor; cursor = await cursor.continue()) {
-        const session = cursor.value
-        let changed = false
-        for (const message of session.messages) {
-          if (message.role !== 'user') {
-            continue
-          }
-          for (const file of message.files) {
-            const type = types.get(file.id) ?? ''
-            if (file.mimeType !== type) {
-              file.mimeType = type
-              changed = true
+      try {
+        await Promise.all(sessions.map((session) => tx.store.add(session)))
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
+}
+
+export const saveStagingFiles = (files: StoredFile[], workspace: string | null): Promise<void> =>
+  putFiles('filesStaging', files, workspace)
+
+/** 只回填已识别的 MIME，保留缺失原件的类型及归档中的图片标识。 */
+export const updateStagingFileTypes = async (
+  types: ReadonlyMap<string, string>,
+  sessionIds: ReadonlySet<string>,
+  workspace: string | null
+): Promise<void> => {
+  if (!sessionIds.size) return
+  const tx = (await getDB(workspace)).transaction('sessionsStaging', 'readwrite')
+  await Promise.all([
+    (async () => {
+      try {
+        for (const id of sessionIds) {
+          const session = await tx.store.get(id)
+          if (!session) continue
+          let changed = false
+          for (const message of session.messages) {
+            if (message.role !== 'user') continue
+            for (const file of message.files) {
+              const type = types.get(file.id)
+              if (type && file.mimeType !== type) {
+                file.mimeType = type
+                changed = true
+              }
             }
           }
+          if (changed) await tx.store.put(session)
         }
-        if (changed) {
-          await cursor.update(session)
-        }
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
       }
     })(),
     tx.done,
@@ -345,9 +375,8 @@ export const updateStagingFileTypes = async (types: ReadonlyMap<string, string>)
  * 导入完成后用暂存替换正式数据：同一事务中替换会话、摘要和原件，并清空暂存。
  * 逐条游标复制，同一时间只读取一条记录；事务失败时整体回滚，正式数据不变。
  */
-export const commitStaging = async (): Promise<SessionSummary[]> => {
+export const commitStaging = async (workspace: string | null): Promise<SessionSummary[]> => {
   const summaries: SessionSummary[] = []
-  const workspace = activeWorkspace
   const synced = syncsToAccount(workspace)
   const tx = (await getDB(workspace)).transaction(
     ['sessions', 'sessionSummaries', 'files', 'sessionsStaging', 'filesStaging', ...(synced ? syncStores : [])] as const,

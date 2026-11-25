@@ -2,13 +2,14 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { once } from 'node:events'
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createAccountServer } from '../../server/index.mjs'
+import { historyFileSize, historyPicture, historySessionCount, historySessionId, makeHistoryZip } from './history-fixtures.mjs'
 
 const findBrowser = async () => {
   const edge = 'Microsoft/Edge/Application/msedge.exe'
@@ -50,7 +51,7 @@ const imageIds = (body) => body.messages.flatMap(({ content }) =>
   Array.isArray(content) ? content.filter(({ type }) => type === 'image').map(({ source }) => source.file_id) : []
 )
 
-test('provider editing, image uploads and history survive account sync and reload', { timeout: 90_000 }, async (t) => {
+test('provider editing, image uploads and history survive account sync and reload', { timeout: 125_000 }, async (t) => {
   const browserPath = await findBrowser()
   const webDir = resolve('dist')
   await access(join(webDir, 'index.html'))
@@ -1276,4 +1277,112 @@ test('provider editing, image uploads and history survive account sync and reloa
   await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: 8, y: 8, button: 'left', clickCount: 1 })
   await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 8, y: 8, button: 'left', clickCount: 1 })
   await until('!document.querySelector("[role=dialog]")')
+
+  // A malformed canonical archive fails after staging without replacing the existing workspace.
+  const openData = async (waitForSync = true) => {
+    await openProviders(3)
+    await clickText('[role="tab"]', '数据管理')
+    if (waitForSync) await until("document.querySelector('[role=tabpanel] [role=status]')?.textContent === '已同步'", 12000)
+  }
+  const selectArchive = async (name, data) => {
+    const file = join(directory, name)
+    await writeFile(file, data)
+    const { root } = await cdp('DOM.getDocument')
+    const { nodeId } = await cdp('DOM.querySelector', { nodeId: root.nodeId, selector: '[role="tabpanel"] input[accept*=".zip"]' })
+    assert.ok(nodeId)
+    await cdp('DOM.setFileInputFiles', { nodeId, files: [file] })
+    await until("document.body.textContent.includes('确认导入历史对话？')")
+    await clickText('[role="dialog"] button', '确认导入')
+  }
+  const providerId = await evaluate("(async () => (await fetch('/api/account/session').then(r => r.json())).providers.find(p => p.protocol === 'deepseek').id)()", true)
+  const connection = { providerId, model: 'deepseek-flash' }
+  await openData()
+  await selectArchive('invalid-history.zip', makeHistoryZip(connection, { interleaved: false, badIndex: true }))
+  await until("document.querySelector('[role=tabpanel]').textContent.includes('文件导入失败')", 8000)
+  assert.ok(await evaluate("document.body.textContent.includes('另一设备改名')"))
+  assert.equal(await evaluate("document.querySelector('[data-session-id=archive-restored]') !== null"), false)
+
+  // Import and sign-in also work without the modern browser APIs replaced by this release.
+  const legacyApis = `delete Array.prototype.toSorted; delete Array.prototype.toReversed;
+    delete AbortSignal.prototype.throwIfAborted; delete AbortSignal.prototype.reason;
+    delete AbortSignal.any; delete AbortSignal.timeout;`
+  await evaluate(legacyApis)
+  await cdp('Page.addScriptToEvaluateOnNewDocument', { source: legacyApis })
+  await evaluate(`(() => {
+    const slice = File.prototype.slice
+    File.prototype.slice = function(start, end, type) {
+      const blob = slice.call(this, start, end, type)
+      if (this.name === 'valid-history.zip' && start >= 512 * 1024 && end < this.size && !window.resumeHistoryImport) {
+        const proceed = new Promise(resolve => { window.resumeHistoryImport = resolve })
+        const arrayBuffer = blob.arrayBuffer.bind(blob)
+        blob.arrayBuffer = async () => { await proceed; return arrayBuffer() }
+      }
+      return blob
+    }
+  })()`)
+  await selectArchive('valid-history.zip', makeHistoryZip(connection, { interleaved: true }))
+  const importing = "window.resumeHistoryImport && document.querySelector('[role=progressbar]')?.getAttribute('aria-valuenow') === '32'"
+  await until(importing, 8000)
+  assert.equal(await evaluate("document.querySelector('[role=progressbar]').getAttribute('aria-valuemax')"), String(historySessionCount))
+  await closeSettings()
+  await until("!document.querySelector('[role=dialog]')")
+  await openData(false)
+  await until(importing)
+  await evaluate('window.resumeHistoryImport()')
+  await until("document.querySelector('[role=tabpanel]').textContent.includes('已导入 " + historySessionCount + " 个对话')", 12000)
+  await until("document.querySelector('[role=tabpanel] [role=status]')?.textContent === '已同步'", 18000)
+  await closeSettings()
+  await until("!document.querySelector('[role=dialog]')")
+
+  const archivedChat = '[data-session-id="' + historySessionId + '"] > button'
+  const image = 'img[alt="archive-picture.png"]'
+  const documentLink = 'a[aria-label="archive-proof.txt"][download]'
+  const readImported = async () => {
+    await until('document.querySelector(' + JSON.stringify(archivedChat) + ')', 18000)
+    await click(archivedChat)
+    await until('document.querySelector(' + JSON.stringify(image) + ')?.naturalWidth === 2')
+    await until('document.querySelector(' + JSON.stringify(documentLink) + ')')
+    return evaluate(`(async () => {
+      const documentBlob = await fetch(document.querySelector(${JSON.stringify(documentLink)}).href).then(response => response.blob())
+      const pictureBytes = await fetch(document.querySelector(${JSON.stringify(image)}).src).then(response => response.arrayBuffer())
+      const digest = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+        byte => byte.toString(16).padStart(2, '0')).join('')
+      const { workspace } = await fetch('/api/account/session').then(response => response.json())
+      const storage = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('ai-hub:workspace:' + workspace)
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+      const stored = await new Promise((resolve, reject) => {
+        const request = storage.transaction('files').objectStore('files').get('archive-text')
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+      storage.close()
+      return {
+        documentMime: stored.blob.type,
+        downloadMime: documentBlob.type,
+        documentSize: documentBlob.size,
+        documentDigest: await digest(await documentBlob.arrayBuffer()),
+        imageDigest: await digest(pictureBytes),
+      }
+    })()`, true)
+  }
+  const expectedOriginals = {
+    documentMime: 'text/plain',
+    downloadMime: 'application/octet-stream',
+    documentSize: historyFileSize,
+    documentDigest: createHash('sha256').update(Buffer.alloc(historyFileSize, 65)).digest('hex'),
+    imageDigest: createHash('sha256').update(historyPicture).digest('hex'),
+  }
+  assert.deepEqual(await readImported(), expectedOriginals)
+  const archivedRecord = await waitForImageRecord(historySessionId, (session) => session.messages.length === 1)
+  assert.equal(archivedRecord.pinned, true)
+  assert.deepEqual(archivedRecord.connection, connection)
+
+  await cdp('Storage.clearDataForOrigin', { origin, storageTypes: 'all' })
+  await cdp('Page.reload', { ignoreCache: true })
+  await until(signIn)
+  await clickText('button', '使用 Gitea 登录')
+  assert.deepEqual(await readImported(), expectedOriginals)
 })

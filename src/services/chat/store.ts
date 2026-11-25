@@ -1,3 +1,4 @@
+import { getAbortReason, throwIfAborted } from '../../utils/abort.js'
 import { create } from 'zustand'
 import { createId } from '../../utils/id.js'
 import { isUploadImageOversized } from '../../utils/resizeUploadImage.js'
@@ -459,7 +460,14 @@ export const flushChatWorkspace = async () => {
  * 替换历史对话：先写入暂存，成功后原子替换旧记录；写入为空即删除全部会话与附件。
  * 期间停止生成并禁止修改会话；失败时清除暂存，保留原有记录。
  */
-export const replaceHistory = async (write: () => Promise<void>): Promise<number> => {
+export const replaceHistory = async (
+  write: () => Promise<void>,
+  workspace: string | null
+): Promise<number> => {
+  const checkWorkspace = () => {
+    if (db.getChatStorage() !== workspace) throw new Error('The history storage location changed')
+  }
+  checkWorkspace()
   if (get().importingHistory) {
     throw new Error('History replacement is already in progress')
   }
@@ -474,15 +482,18 @@ export const replaceHistory = async (write: () => Promise<void>): Promise<number
     initTask = undefined
     sessionLoads.clear()
     await waitForIdle()
-    await db.clearStaging()
+    checkWorkspace()
+    await db.clearStaging(workspace)
     let summaries: SessionSummary[]
     try {
       await write()
-      summaries = await db.commitStaging()
+      checkWorkspace()
+      summaries = await db.commitStaging(workspace)
     } catch (error) {
-      await db.clearStaging().catch(db.reportStorageError('clear unfinished history replacement'))
+      await db.clearStaging(workspace).catch(db.reportStorageError('clear unfinished history replacement'))
       throw error
     }
+    if (db.getChatStorage() !== workspace) return summaries.length
     sessionAccess.clear()
     unsavedSessions.clear()
     pendingFiles.clear()
@@ -938,11 +949,11 @@ const checkImageFileIds = async (
   for (const file of files) {
     const serverId = getScopedServerId(connection, file)
     if (!file.isImage || !serverId || file.imageSizeChecked || checked.has(file.id)) continue
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     const oversized = await db.loadFile(file.id)
       .then((blob) => blob && isUploadImageOversized(blob))
       .catch(() => undefined)
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     if (oversized === undefined) continue
     const task = useUploads.getState().tasks[file.id]
     if (oversized && task?.status === 'done' && task.scope === connection.scope && task.serverId === serverId) {
@@ -1011,7 +1022,7 @@ const prepareFiles = async (
   const serverIds = new Map<string, string>()
   // 停止生成立即生效；上传本身不取消（输入框与其他消息可能共用同一任务），完成后照常写回 serverId
   const aborted = new Promise<never>((_, reject) => {
-    signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    signal.addEventListener('abort', () => reject(getAbortReason(signal)), { once: true })
   })
   if (connection.protocol === 'deepseek') {
     const files = [
@@ -1044,7 +1055,7 @@ const prepareFiles = async (
   }
 
   const pending = new Map<string, FileAttachment>()
-  for (const [user] of getContextRounds(request.history).toReversed()) {
+  for (const [user] of getContextRounds(request.history).reverse()) {
     for (const file of user.files) {
       if (
         !getScopedServerId(connection, file) &&
@@ -1056,7 +1067,7 @@ const prepareFiles = async (
     }
   }
   for (const file of pending.values()) {
-    signal.throwIfAborted()
+    throwIfAborted(signal)
     try {
       const serverId = await Promise.race([ensureServerId(connection, file), aborted])
       if (serverId) {
@@ -1064,7 +1075,7 @@ const prepareFiles = async (
         saveServerIds(sessionId, new Map([[file.id, serverId]]), connection)
       }
     } catch {
-      signal.throwIfAborted()
+      throwIfAborted(signal)
     }
   }
 
